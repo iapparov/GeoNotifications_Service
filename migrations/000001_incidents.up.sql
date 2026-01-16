@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS incidents(
+    id uuid PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    radius DOUBLE PRECISION  NULL,
+    severity VARCHAR(50) NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

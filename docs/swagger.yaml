@@ -1,0 +1,365 @@
+basePath: /
+definitions:
+  domain.Incident:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      isActive:
+        type: boolean
+      latitude:
+        type: number
+      longitude:
+        type: number
+      radius:
+        type: number
+      severity:
+        $ref: '#/definitions/domain.SeverityLevel'
+      title:
+        type: string
+      type:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  domain.SeverityLevel:
+    enum:
+    - low
+    - medium
+    - high
+    type: string
+    x-enum-varnames:
+    - SeverityLow
+    - SeverityMedium
+    - SeverityHigh
+  dto.ErrorResponse:
+    properties:
+      message:
+        type: string
+    type: object
+  dto.HealthChecks:
+    properties:
+      database:
+        type: boolean
+      redis:
+        type: boolean
+    type: object
+  dto.IncidentRequestCreate:
+    properties:
+      description:
+        type: string
+      incident_type:
+        type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
+      radius:
+        type: number
+      severity:
+        enum:
+        - low
+        - medium
+        - high
+        type: string
+      title:
+        type: string
+    required:
+    - description
+    - incident_type
+    - severity
+    - title
+    type: object
+  dto.IncidentRequestUpdate:
+    properties:
+      description:
+        type: string
+      incident_type:
+        type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
+      radius:
+        type: number
+      severity:
+        enum:
+        - low
+        - medium
+        - high
+        type: string
+      title:
+        type: string
+    required:
+    - description
+    - incident_type
+    - severity
+    - title
+    type: object
+  dto.LocationRequest:
+    properties:
+      latitude:
+        type: number
+      longitude:
+        type: number
+      uid:
+        type: string
+    required:
+    - uid
+    type: object
+  dto.SystemHealthResponse:
+    properties:
+      checks:
+        $ref: '#/definitions/dto.HealthChecks'
+      status:
+        description: ok / degraded
+        type: string
+    type: object
+info:
+  contact: {}
+  description: API для управления гео уведомлениями и гео зонами.
+  termsOfService: http://swagger.io/terms/
+  title: GeoNotification API
+  version: "1.0"
+paths:
+  /api/v1/incidents:
+    get:
+      description: Возвращает инциденты с пагинацией
+      parameters:
+      - default: 1
+        description: Номер страницы
+        in: query
+        name: page
+        type: integer
+      - default: 10
+        description: Размер страницы
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Incident'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Список инцидентов
+      tags:
+      - incidents
+    post:
+      consumes:
+      - application/json
+      description: Создает новый инцидент
+      parameters:
+      - description: Данные инцидента
+        in: body
+        name: incident
+        required: true
+        schema:
+          $ref: '#/definitions/dto.IncidentRequestCreate'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.Incident'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Создать инцидент
+      tags:
+      - incidents
+  /api/v1/incidents/{id}:
+    delete:
+      description: Удаляет инцидент по ID
+      parameters:
+      - description: Incident ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Удалить инцидент
+      tags:
+      - incidents
+    get:
+      description: Возвращает инцидент по его идентификатору
+      parameters:
+      - description: Incident ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Incident'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Получить инцидент по ID
+      tags:
+      - incidents
+    put:
+      consumes:
+      - application/json
+      description: Обновляет данные инцидента по ID
+      parameters:
+      - description: Incident ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Новые данные инцидента
+        in: body
+        name: incident
+        required: true
+        schema:
+          $ref: '#/definitions/dto.IncidentRequestUpdate'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Incident'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Обновить инцидент
+      tags:
+      - incidents
+  /api/v1/incidents/stats:
+    get:
+      description: Возвращает общее количество инцидентов
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: total_incidents
+          schema:
+            additionalProperties:
+              type: integer
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      summary: Статистика инцидентов
+      tags:
+      - incidents
+  /api/v1/location/check:
+    post:
+      consumes:
+      - application/json
+      description: Проверяет местоположение пользователя на наличие опасных инцидентов
+      parameters:
+      - description: Координаты пользователя
+        in: body
+        name: location
+        required: true
+        schema:
+          $ref: '#/definitions/dto.LocationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Incident'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      summary: Проверить местоположение
+      tags:
+      - location
+  /api/v1/system/health:
+    get:
+      description: Возвращает состояние компонентов системы
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.SystemHealthResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      summary: Статус системы
+      tags:
+      - system
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: X-API-Key
+    type: apiKey
+swagger: "2.0"
