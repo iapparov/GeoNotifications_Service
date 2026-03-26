@@ -13,20 +13,23 @@ import (
 	"go.uber.org/zap"
 )
 
+// Redis wraps a redis client and provides cache and queue operations.
 type Redis struct {
 	client *redis.Client
-	logger *logger.Service
+	log    *logger.Service
 	cfg    *config.App
 	db     DB
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
 }
 
+// DB is used to load data for cache warm-up.
 type DB interface {
 	WarmUp(ctx context.Context, timeout time.Duration) ([]*domain.Incident, error)
 }
 
-func NewRedis(logger *logger.Service, cfg *config.App, db DB) (*Redis, error) {
+// NewRedis creates a Redis client and verifies connectivity.
+func NewRedis(log *logger.Service, cfg *config.App, db DB) (*Redis, error) {
 	addr := fmt.Sprintf("%s:%d", cfg.DB.Redis.Host, cfg.DB.Redis.Port)
 
 	client := redis.NewClient(&redis.Options{
@@ -39,32 +42,34 @@ func NewRedis(logger *logger.Service, cfg *config.App, db DB) (*Redis, error) {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("redis ping failed: %w", err)
+		return nil, fmt.Errorf("redis ping: %w", err)
 	}
 
-	logger.Log(zap.InfoLevel, "connected to redis")
+	log.Log(zap.InfoLevel, "connected to redis")
 
 	return &Redis{
 		client: client,
-		logger: logger,
+		log:    log,
 		cfg:    cfg,
 		db:     db,
 	}, nil
 }
 
+// Close releases the redis client.
 func (r *Redis) Close() error {
 	if err := r.client.Close(); err != nil {
-		return fmt.Errorf("closing redis client: %w", err)
+		return fmt.Errorf("close redis: %w", err)
 	}
 	return nil
 }
 
-func (r *Redis) Ping(ctx context.Context, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+// Ping checks redis connectivity within the given timeout.
+func (r *Redis) Ping(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if err := r.client.Ping(ctxWithTimeout).Err(); err != nil {
-		return fmt.Errorf("redis ping failed: %w", err)
+	if err := r.client.Ping(ctx).Err(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,34 +56,4 @@ func (i *Incident) Update(title, description string, latitude, longitude, radius
 	i.Severity = severity
 	i.Type = incidentType
 	i.UpdatedAt = time.Now()
-}
-
-func (i *Incident) IsLocationInIncidentArea(latitude, longitude float64) bool {
-	distance := distanceMeters(
-		latitude, longitude,
-		i.Latitude, i.Longitude,
-	)
-
-	return distance <= i.Radius
-}
-
-func distanceMeters(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371000 // meters
-
-	dLat := degreesToRadians(lat2 - lat1)
-	dLon := degreesToRadians(lon2 - lon1)
-
-	lat1Rad := degreesToRadians(lat1)
-	lat2Rad := degreesToRadians(lat2)
-
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return earthRadius * c
-}
-
-func degreesToRadians(deg float64) float64 {
-	return deg * math.Pi / 180
 }

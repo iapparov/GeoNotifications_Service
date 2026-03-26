@@ -9,16 +9,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type System struct {
-	service SystemService
-}
-
+// SystemService defines the interface consumed by the system handler.
 type SystemService interface {
 	Health(ctx context.Context) domain.HealthStatus
 }
 
-func NewSystem(service SystemService) *System {
-	return &System{service: service}
+// System is the HTTP handler for system endpoints.
+type System struct {
+	svc SystemService
+}
+
+// NewSystem creates a System handler.
+func NewSystem(svc SystemService) *System {
+	return &System{svc: svc}
 }
 
 // @Summary Статус системы
@@ -29,23 +32,21 @@ func NewSystem(service SystemService) *System {
 // @Failure 500 {object} dto.ErrorResponse
 // @Router /api/v1/system/health [get]
 func (h *System) Health(c *gin.Context) {
-	status := h.service.Health(c.Request.Context())
+	status := h.svc.Health(c.Request.Context())
 
 	httpStatus := http.StatusOK
-	serviceStatus := "ok"
+	svcStatus := "ok"
 
 	if !status.Database || !status.Redis {
 		httpStatus = http.StatusServiceUnavailable
-		serviceStatus = "degraded"
+		svcStatus = "degraded"
 	}
 
-	response := dto.SystemHealthResponse{
-		Status: serviceStatus,
+	c.JSON(httpStatus, dto.SystemHealthResponse{
+		Status: svcStatus,
 		Checks: dto.HealthChecks{
 			Database: status.Database,
 			Redis:    status.Redis,
 		},
-	}
-
-	c.JSON(httpStatus, response)
+	})
 }

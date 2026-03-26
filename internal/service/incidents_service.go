@@ -6,194 +6,210 @@ import (
 	"geoNotifications/internal/config"
 	"geoNotifications/internal/domain"
 	"geoNotifications/internal/logger"
-	retry "geoNotifications/internal/rerty"
+	"geoNotifications/internal/retry"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap/zapcore"
 )
 
-type Incidents struct {
-	incidentsDB         IncidentsDB
-	incidentsCache      IncidentsCache
-	incidentsCacheRetry CacheRetryQueue
-	logger              *logger.Service
-	config              *config.App
-}
-
+// IncidentsDB defines the database operations for incidents.
 type IncidentsDB interface {
-	Create(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error
-	Update(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error
-	GetStats(ctx context.Context, timeOut time.Duration) (int, error)
-	GetAllIncidents(ctx context.Context, page, limit int, timeOut time.Duration) ([]domain.Incident, int, error)
-	GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration) (*domain.Incident, error)
-	Delete(ctx context.Context, id uuid.UUID, timeOut time.Duration) error
+	Create(ctx context.Context, incident *domain.Incident, timeout time.Duration) error
+	Update(ctx context.Context, incident *domain.Incident, timeout time.Duration) error
+	GetStats(ctx context.Context, timeout time.Duration) (int, error)
+	GetAllIncidents(ctx context.Context, page, limit int, timeout time.Duration) ([]domain.Incident, int, error)
+	GetByID(ctx context.Context, id uuid.UUID, timeout time.Duration) (*domain.Incident, error)
+	Delete(ctx context.Context, id uuid.UUID, timeout time.Duration) error
 }
 
+// IncidentsCache defines the cache operations for incidents.
 type IncidentsCache interface {
-	Set(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error
-	Delete(ctx context.Context, id uuid.UUID, timeOut time.Duration) error
-	GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration) (*domain.Incident, error)
+	Set(ctx context.Context, incident *domain.Incident, timeout time.Duration) error
+	Delete(ctx context.Context, id uuid.UUID, timeout time.Duration) error
+	GetByID(ctx context.Context, id uuid.UUID, timeout time.Duration) (*domain.Incident, error)
 }
 
+// CacheRetryQueue enqueues failed cache writes for retry.
 type CacheRetryQueue interface {
 	Enqueue(incident *domain.Incident)
 }
 
-func NewIncidents(db IncidentsDB, cache IncidentsCache, incidentsCacheRetry CacheRetryQueue, logger *logger.Service, config *config.App) *Incidents {
+// Incidents handles incident business logic.
+type Incidents struct {
+	db         IncidentsDB
+	cache      IncidentsCache
+	retryQueue CacheRetryQueue
+	log        *logger.Service
+	cfg        *config.App
+}
+
+// NewIncidents creates an Incidents service.
+func NewIncidents(db IncidentsDB, cache IncidentsCache, retryQueue CacheRetryQueue, log *logger.Service, cfg *config.App) *Incidents {
 	return &Incidents{
-		incidentsDB:         db,
-		incidentsCache:      cache,
-		logger:              logger,
-		config:              config,
-		incidentsCacheRetry: incidentsCacheRetry,
+		db:         db,
+		cache:      cache,
+		retryQueue: retryQueue,
+		log:        log,
+		cfg:        cfg,
 	}
 }
 
-func (i *Incidents) Create(title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error) {
-	err := i.incidentsValidation(title, description, latitude, longitude, radius, severity, incidentType)
-	if err != nil {
-		i.logger.Log(zapcore.DebugLevel, err.Error())
-		return nil, err
-	}
-	incident := domain.NewIncident(title, description, latitude, longitude, radius, domain.SeverityLevel(severity), incidentType)
-
-	err = i.incidentsDB.Create(incident, ctx, i.config.DB.TimeOuts.Write)
-	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to create incident in db: "+err.Error())
+// Create validates input, persists a new incident, and writes it to cache.
+func (s *Incidents) Create(ctx context.Context, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
+	if err := s.validate(title, description, lat, lon, radius, severity, incidentType); err != nil {
+		s.log.Log(zapcore.DebugLevel, err.Error())
 		return nil, err
 	}
 
-	err = retry.DoContext(ctx, retry.Strategy{Attempts: i.config.Retry.MaxAttempts, Delay: i.config.Retry.Delay, Backoff: i.config.Retry.Backoff}, func() error {
-		return i.incidentsCache.Set(incident, ctx, i.config.DB.TimeOuts.Write)
-	})
-	if err != nil {
-		i.logger.Log(zapcore.WarnLevel, "failed to create incident in cache: "+err.Error())
-		i.incidentsCacheRetry.Enqueue(incident)
+	inc := domain.NewIncident(title, description, lat, lon, radius, domain.SeverityLevel(severity), incidentType)
+
+	if err := s.db.Create(ctx, inc, s.cfg.DB.TimeOuts.Write); err != nil {
+		s.log.Log(zapcore.ErrorLevel, "db create incident: "+err.Error())
+		return nil, err
 	}
 
-	return incident, nil
+	if err := retry.Do(ctx, s.retryStrategy(), func() error {
+		return s.cache.Set(ctx, inc, s.cfg.DB.TimeOuts.Write)
+	}); err != nil {
+		s.log.Log(zapcore.WarnLevel, "cache set incident: "+err.Error())
+		s.retryQueue.Enqueue(inc)
+	}
+
+	return inc, nil
 }
 
-func (i *Incidents) GetStats(ctx context.Context) (int, error) {
-	userCount, err := i.incidentsDB.GetStats(ctx, i.config.DB.TimeOuts.Read)
+// GetStats returns the number of unique users who checked location recently.
+func (s *Incidents) GetStats(ctx context.Context) (int, error) {
+	count, err := s.db.GetStats(ctx, s.cfg.DB.TimeOuts.Read)
 	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to get stats from db: "+err.Error())
+		s.log.Log(zapcore.ErrorLevel, "db get stats: "+err.Error())
 		return 0, err
 	}
-	return userCount, nil
+	return count, nil
 }
 
-func (i *Incidents) GetAllIncidents(ctx context.Context, page, limit int) ([]domain.Incident, int, error) {
-	incidents, count, err := i.incidentsDB.GetAllIncidents(ctx, page, limit, i.config.DB.TimeOuts.Read)
+// GetAllIncidents returns a paginated list of incidents.
+func (s *Incidents) GetAllIncidents(ctx context.Context, page, limit int) ([]domain.Incident, int, error) {
+	incidents, count, err := s.db.GetAllIncidents(ctx, page, limit, s.cfg.DB.TimeOuts.Read)
 	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to get all incidents from db: "+err.Error())
+		s.log.Log(zapcore.ErrorLevel, "db get all incidents: "+err.Error())
 		return nil, 0, err
 	}
 	return incidents, count, nil
 }
 
-func (i *Incidents) GetByID(ctx context.Context, id string) (*domain.Incident, error) {
+// GetByID looks up an incident in cache first, then falls back to the database.
+func (s *Incidents) GetByID(ctx context.Context, id string) (*domain.Incident, error) {
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		i.logger.Log(zapcore.DebugLevel, "invalid incident ID: "+err.Error())
+		s.log.Log(zapcore.DebugLevel, "invalid incident ID: "+err.Error())
 		return nil, domain.ErrInvalidID
 	}
 
-	incident, err := i.incidentsCache.GetByID(ctx, uid, i.config.DB.TimeOuts.Read)
+	inc, err := s.cache.GetByID(ctx, uid, s.cfg.DB.TimeOuts.Read)
 	if err == nil {
-		return incident, nil
+		return inc, nil
 	}
 
 	if errors.Is(err, domain.ErrIncidentNotFound) {
-		i.logger.Log(zapcore.DebugLevel, "incident not found in cache, fetching from db")
+		s.log.Log(zapcore.DebugLevel, "incident not in cache, querying db")
 	} else {
-		i.logger.Log(zapcore.WarnLevel, "cache error, fallback to db: "+err.Error())
+		s.log.Log(zapcore.WarnLevel, "cache error, fallback to db: "+err.Error())
 	}
 
-	incident, err = i.incidentsDB.GetByID(ctx, uid, i.config.DB.TimeOuts.Read)
+	inc, err = s.db.GetByID(ctx, uid, s.cfg.DB.TimeOuts.Read)
 	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to get incident from db: "+err.Error())
+		s.log.Log(zapcore.ErrorLevel, "db get incident: "+err.Error())
 		return nil, err
 	}
-	_ = i.incidentsCache.Set(incident, ctx, i.config.DB.TimeOuts.Write)
 
-	return incident, nil
+	_ = s.cache.Set(ctx, inc, s.cfg.DB.TimeOuts.Write)
+	return inc, nil
 }
 
-func (i *Incidents) Update(id, title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error) {
-	err := i.incidentsValidation(title, description, latitude, longitude, radius, severity, incidentType)
-	if err != nil {
-		i.logger.Log(zapcore.DebugLevel, err.Error())
-		return nil, err
-	}
-	incident, err := i.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	incident.Update(title, description, latitude, longitude, radius, domain.SeverityLevel(severity), incidentType)
-
-	err = i.incidentsDB.Update(incident, ctx, i.config.DB.TimeOuts.Write)
-	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to update incident in db: "+err.Error())
+// Update validates input, updates the incident in the database and cache.
+func (s *Incidents) Update(ctx context.Context, id, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
+	if err := s.validate(title, description, lat, lon, radius, severity, incidentType); err != nil {
+		s.log.Log(zapcore.DebugLevel, err.Error())
 		return nil, err
 	}
 
-	err = retry.DoContext(ctx, retry.Strategy{Attempts: i.config.Retry.MaxAttempts, Delay: i.config.Retry.Delay, Backoff: i.config.Retry.Backoff}, func() error {
-		return i.incidentsCache.Set(incident, ctx, i.config.DB.TimeOuts.Write)
-	})
+	inc, err := s.GetByID(ctx, id)
 	if err != nil {
-		i.logger.Log(zapcore.WarnLevel, "failed to update incident in cache: "+err.Error())
-		i.incidentsCacheRetry.Enqueue(incident)
+		return nil, err
 	}
 
-	return incident, nil
+	inc.Update(title, description, lat, lon, radius, domain.SeverityLevel(severity), incidentType)
+
+	if err := s.db.Update(ctx, inc, s.cfg.DB.TimeOuts.Write); err != nil {
+		s.log.Log(zapcore.ErrorLevel, "db update incident: "+err.Error())
+		return nil, err
+	}
+
+	if err := retry.Do(ctx, s.retryStrategy(), func() error {
+		return s.cache.Set(ctx, inc, s.cfg.DB.TimeOuts.Write)
+	}); err != nil {
+		s.log.Log(zapcore.WarnLevel, "cache update incident: "+err.Error())
+		s.retryQueue.Enqueue(inc)
+	}
+
+	return inc, nil
 }
 
-func (i *Incidents) Delete(ctx context.Context, id string) error {
+// Delete soft-deletes the incident from the database and removes it from cache.
+func (s *Incidents) Delete(ctx context.Context, id string) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		i.logger.Log(zapcore.DebugLevel, "invalid incident ID: "+err.Error())
+		s.log.Log(zapcore.DebugLevel, "invalid incident ID: "+err.Error())
 		return domain.ErrInvalidID
 	}
 
-	err = i.incidentsDB.Delete(ctx, uid, i.config.DB.TimeOuts.Write)
-	if err != nil {
-		i.logger.Log(zapcore.ErrorLevel, "failed to delete incident from db: "+err.Error())
+	if err := s.db.Delete(ctx, uid, s.cfg.DB.TimeOuts.Write); err != nil {
+		s.log.Log(zapcore.ErrorLevel, "db delete incident: "+err.Error())
 		return err
 	}
 
-	err = retry.DoContext(ctx, retry.Strategy{Attempts: i.config.Retry.MaxAttempts, Delay: i.config.Retry.Delay, Backoff: i.config.Retry.Backoff}, func() error {
-		return i.incidentsCache.Delete(ctx, uid, i.config.DB.TimeOuts.Write)
-	})
-	if err != nil {
-		i.logger.Log(zapcore.WarnLevel, "failed to delete incident from cache: "+err.Error())
+	if err := retry.Do(ctx, s.retryStrategy(), func() error {
+		return s.cache.Delete(ctx, uid, s.cfg.DB.TimeOuts.Write)
+	}); err != nil {
+		s.log.Log(zapcore.WarnLevel, "cache delete incident: "+err.Error())
 		return err
 	}
 
 	return nil
 }
 
-func (i *Incidents) incidentsValidation(title, description string, latitude, longitude, radius float64, severity, incidentType string) error {
-	if len(title) < i.config.Incident.TitleMinLength || len(title) > i.config.Incident.TitleMaxLength {
+func (s *Incidents) retryStrategy() retry.Strategy {
+	return retry.Strategy{
+		Attempts: s.cfg.Retry.MaxAttempts,
+		Delay:    s.cfg.Retry.Delay,
+		Backoff:  s.cfg.Retry.Backoff,
+	}
+}
+
+func (s *Incidents) validate(title, description string, lat, lon, radius float64, severity, incidentType string) error {
+	if len(title) < s.cfg.Incident.TitleMinLength || len(title) > s.cfg.Incident.TitleMaxLength {
 		return domain.ErrInvalidTitle
 	}
-	if len(description) < i.config.Incident.DescriptionMinLength || len(description) > i.config.Incident.DescriptionMaxLength {
+	if len(description) < s.cfg.Incident.DescriptionMinLength || len(description) > s.cfg.Incident.DescriptionMaxLength {
 		return domain.ErrInvalidDescription
 	}
-	if latitude < -90 || latitude > 90 {
+	if lat < -90 || lat > 90 {
 		return domain.ErrInvalidLatitude
 	}
-	if longitude < -180 || longitude > 180 {
+	if lon < -180 || lon > 180 {
 		return domain.ErrInvalidLongitude
 	}
 	if radius <= 0 {
 		return domain.ErrInvalidRadius
 	}
-	if severity != string(domain.SeverityLow) && severity != string(domain.SeverityMedium) && severity != string(domain.SeverityHigh) {
+	switch domain.SeverityLevel(severity) {
+	case domain.SeverityLow, domain.SeverityMedium, domain.SeverityHigh:
+	default:
 		return domain.ErrInvalidSeverity
 	}
-	if len(incidentType) == 0 {
+	if incidentType == "" {
 		return domain.ErrInvalidType
 	}
 	return nil

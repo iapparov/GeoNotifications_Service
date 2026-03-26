@@ -12,8 +12,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func (r *Redis) Set(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+const activeIDsKey = "active_incident_ids"
+
+// Set stores an incident in Redis and adds its ID to the active set.
+func (r *Redis) Set(ctx context.Context, incident *domain.Incident, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	data, err := json.Marshal(incident)
@@ -22,38 +25,36 @@ func (r *Redis) Set(incident *domain.Incident, ctx context.Context, timeOut time
 	}
 
 	pipe := r.client.TxPipeline()
-	pipe.Set(ctxWithTimeout, incident.ID.String(), data, 0)
-	pipe.SAdd(ctxWithTimeout, "active_incident_ids", incident.ID.String())
+	pipe.Set(ctx, incident.ID.String(), data, 0)
+	pipe.SAdd(ctx, activeIDsKey, incident.ID.String())
 
-	_, err = pipe.Exec(ctxWithTimeout)
-
-	if err != nil {
-		return fmt.Errorf("redis set: %w", err)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("redis set incident: %w", err)
 	}
-
 	return nil
 }
 
-func (r *Redis) Delete(ctx context.Context, id uuid.UUID, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+// Delete removes an incident from Redis and the active set.
+func (r *Redis) Delete(ctx context.Context, id uuid.UUID, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	pipe := r.client.TxPipeline()
-	pipe.Del(ctxWithTimeout, id.String())
-	pipe.SRem(ctxWithTimeout, "active_incident_ids", id.String())
-	_, err := pipe.Exec(ctxWithTimeout)
+	pipe.Del(ctx, id.String())
+	pipe.SRem(ctx, activeIDsKey, id.String())
 
-	if err != nil {
-		return fmt.Errorf("redis delete: %w", err)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("redis delete incident: %w", err)
 	}
-
 	return nil
 }
-func (r *Redis) GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration) (*domain.Incident, error) {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+
+// GetByID retrieves a single incident from Redis.
+func (r *Redis) GetByID(ctx context.Context, id uuid.UUID, timeout time.Duration) (*domain.Incident, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	data, err := r.client.Get(ctxWithTimeout, id.String()).Result()
+	data, err := r.client.Get(ctx, id.String()).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, domain.ErrIncidentNotFound
@@ -61,73 +62,37 @@ func (r *Redis) GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration
 		return nil, fmt.Errorf("redis get: %w", err)
 	}
 
-	var incident domain.Incident
-	err = json.Unmarshal([]byte(data), &incident)
-	if err != nil {
+	var inc domain.Incident
+	if err := json.Unmarshal([]byte(data), &inc); err != nil {
 		return nil, fmt.Errorf("unmarshal incident: %w", err)
 	}
-
-	return &incident, nil
-}
-func (r *Redis) Check(location *domain.Location, ctx context.Context, timeOut time.Duration) ([]*domain.Incident, error) {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
-	defer cancel()
-
-	ids, err := r.client.SMembers(ctxWithTimeout, "active_incident_ids").Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis SMEMBERS: %w", err)
-	}
-
-	if len(ids) == 0 {
-		return []*domain.Incident{}, nil
-	}
-
-	data, err := r.client.MGet(ctxWithTimeout, ids...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis MGET: %w", err)
-	}
-
-	incidentsInArea := make([]*domain.Incident, 0, len(data))
-	for _, d := range data {
-		str, ok := d.(string)
-		if !ok {
-			return nil, fmt.Errorf("unexpected redis MGET type %T", d)
-		}
-		var incident domain.Incident
-		err := json.Unmarshal([]byte(str), &incident)
-		if err != nil {
-			return nil, fmt.Errorf("unmarshal incident: %w", err)
-		}
-		if incident.IsLocationInIncidentArea(location.Latitude, location.Longitude) {
-			incidentsInArea = append(incidentsInArea, &incident)
-		}
-	}
-	return incidentsInArea, nil
+	return &inc, nil
 }
 
-func (r *Redis) WarmUp(ctx context.Context, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+// WarmUp loads all active incidents from the database into Redis.
+func (r *Redis) WarmUp(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	incidents, err := r.db.WarmUp(ctxWithTimeout, timeOut)
-
+	incidents, err := r.db.WarmUp(ctx, timeout)
 	if err != nil {
-		return fmt.Errorf("redis warm up: %w", err)
+		return fmt.Errorf("warmup load: %w", err)
 	}
 
 	pipe := r.client.TxPipeline()
-
-	pipe.Del(ctxWithTimeout, "active_incident_ids") // очистка старого индекса
+	pipe.Del(ctx, activeIDsKey)
 
 	for _, inc := range incidents {
-		data, _ := json.Marshal(inc)
-		pipe.Set(ctxWithTimeout, inc.ID.String(), data, 0)
-		pipe.SAdd(ctxWithTimeout, "active_incident_ids", inc.ID.String())
+		data, err := json.Marshal(inc)
+		if err != nil {
+			return fmt.Errorf("marshal incident %s: %w", inc.ID, err)
+		}
+		pipe.Set(ctx, inc.ID.String(), data, 0)
+		pipe.SAdd(ctx, activeIDsKey, inc.ID.String())
 	}
 
-	_, err = pipe.Exec(ctxWithTimeout)
-	if err != nil {
-		return fmt.Errorf("redis warm up: %w", err)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("warmup exec: %w", err)
 	}
 	return nil
 }

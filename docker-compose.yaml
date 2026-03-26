@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgis/postgis:16-3.4
     container_name: postgres
     environment:
       POSTGRES_USER: ${DB_POSTGRES_USER}
@@ -11,7 +11,7 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRES_USER} -d ${DB_POSTGRES_DBNAME}"]
       interval: 5s
       timeout: 5s
       retries: 5

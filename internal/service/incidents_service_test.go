@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 )
 
+// --- stubs ---
+
 type stubIncidentsDB struct {
 	createCalled bool
 	updateCalled bool
@@ -23,26 +25,26 @@ type stubIncidentsDB struct {
 	err          error
 }
 
-func (s *stubIncidentsDB) Create(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error {
+func (s *stubIncidentsDB) Create(ctx context.Context, incident *domain.Incident, timeout time.Duration) error {
 	s.createCalled = true
 	s.gotIncident = incident
 	return s.err
 }
-func (s *stubIncidentsDB) Update(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error {
+func (s *stubIncidentsDB) Update(ctx context.Context, incident *domain.Incident, timeout time.Duration) error {
 	s.updateCalled = true
 	s.gotIncident = incident
 	return s.err
 }
-func (s *stubIncidentsDB) GetStats(ctx context.Context, timeOut time.Duration) (int, error) {
+func (s *stubIncidentsDB) GetStats(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, s.err
 }
-func (s *stubIncidentsDB) GetAllIncidents(ctx context.Context, page, limit int, timeOut time.Duration) ([]domain.Incident, int, error) {
+func (s *stubIncidentsDB) GetAllIncidents(ctx context.Context, page, limit int, timeout time.Duration) ([]domain.Incident, int, error) {
 	return nil, 0, s.err
 }
-func (s *stubIncidentsDB) GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration) (*domain.Incident, error) {
+func (s *stubIncidentsDB) GetByID(ctx context.Context, id uuid.UUID, timeout time.Duration) (*domain.Incident, error) {
 	return s.getByIDResp, s.getByIDErr
 }
-func (s *stubIncidentsDB) Delete(ctx context.Context, id uuid.UUID, timeOut time.Duration) error {
+func (s *stubIncidentsDB) Delete(ctx context.Context, id uuid.UUID, timeout time.Duration) error {
 	s.deleteCalled = true
 	return s.err
 }
@@ -56,21 +58,23 @@ type stubIncidentsCache struct {
 	deleteCalled bool
 }
 
-func (s *stubIncidentsCache) Set(incident *domain.Incident, ctx context.Context, timeOut time.Duration) error {
+func (s *stubIncidentsCache) Set(ctx context.Context, incident *domain.Incident, timeout time.Duration) error {
 	s.setCalled = true
 	return s.setErr
 }
-func (s *stubIncidentsCache) Delete(ctx context.Context, id uuid.UUID, timeOut time.Duration) error {
+func (s *stubIncidentsCache) Delete(ctx context.Context, id uuid.UUID, timeout time.Duration) error {
 	s.deleteCalled = true
 	return s.deleteErr
 }
-func (s *stubIncidentsCache) GetByID(ctx context.Context, id uuid.UUID, timeOut time.Duration) (*domain.Incident, error) {
+func (s *stubIncidentsCache) GetByID(ctx context.Context, id uuid.UUID, timeout time.Duration) (*domain.Incident, error) {
 	return s.getResp, s.getErr
 }
 
 type stubCacheRetryQueue struct{ enqueued bool }
 
 func (s *stubCacheRetryQueue) Enqueue(incident *domain.Incident) { s.enqueued = true }
+
+// --- helpers ---
 
 func testIncidentsConfig() *config.App {
 	return &config.App{
@@ -85,11 +89,13 @@ func testLogger(cfg *config.App) *logger.Service {
 	return logger.NewService(cfg)
 }
 
+// --- tests ---
+
 func TestIncidents_Create_InvalidTitle(t *testing.T) {
 	cfg := testIncidentsConfig()
 	svc := NewIncidents(&stubIncidentsDB{}, &stubIncidentsCache{}, &stubCacheRetryQueue{}, testLogger(cfg), cfg)
 
-	_, err := svc.Create("a", "desc", 0, 0, 1, string(domain.SeverityLow), "type", context.Background())
+	_, err := svc.Create(context.Background(), "a", "desc", 0, 0, 1, string(domain.SeverityLow), "type")
 	if !errors.Is(err, domain.ErrInvalidTitle) {
 		t.Fatalf("expected ErrInvalidTitle, got %v", err)
 	}
@@ -102,18 +108,18 @@ func TestIncidents_Create_CacheErrorEnqueueRetry(t *testing.T) {
 	retryQueue := &stubCacheRetryQueue{}
 	svc := NewIncidents(db, cache, retryQueue, testLogger(cfg), cfg)
 
-	inc, err := svc.Create("title", "description", 10, 10, 100, string(domain.SeverityLow), "type", context.Background())
+	inc, err := svc.Create(context.Background(), "title", "description", 10, 10, 100, string(domain.SeverityLow), "type")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !db.createCalled {
-		t.Fatalf("db.Create not called")
+		t.Fatal("db.Create not called")
 	}
 	if !cache.setCalled {
-		t.Fatalf("cache.Set not called")
+		t.Fatal("cache.Set not called")
 	}
 	if !retryQueue.enqueued {
-		t.Fatalf("cache retry enqueue not triggered")
+		t.Fatal("cache retry enqueue not triggered")
 	}
 	if inc == nil || inc.Title != "title" {
 		t.Fatalf("unexpected incident: %+v", inc)
@@ -125,7 +131,7 @@ func TestIncidents_Create_DbError(t *testing.T) {
 	db := &stubIncidentsDB{err: errors.New("db down")}
 	svc := NewIncidents(db, &stubIncidentsCache{}, &stubCacheRetryQueue{}, testLogger(cfg), cfg)
 
-	_, err := svc.Create("title", "description", 1, 1, 1, string(domain.SeverityLow), "type", context.Background())
+	_, err := svc.Create(context.Background(), "title", "description", 1, 1, 1, string(domain.SeverityLow), "type")
 	if err == nil {
 		t.Fatal("expected db error")
 	}
@@ -180,7 +186,7 @@ func TestIncidents_Update_CacheErrorEnqueue(t *testing.T) {
 	retryQueue := &stubCacheRetryQueue{}
 	svc := NewIncidents(db, cache, retryQueue, testLogger(cfg), cfg)
 
-	_, err := svc.Update(existing.ID.String(), "t2", "d2", 1, 1, 2, string(domain.SeverityHigh), "type2", context.Background())
+	_, err := svc.Update(context.Background(), existing.ID.String(), "t2", "d2", 1, 1, 2, string(domain.SeverityHigh), "type2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -196,7 +202,7 @@ func TestIncidents_Update_DbError(t *testing.T) {
 	cache := &stubIncidentsCache{getErr: domain.ErrIncidentNotFound}
 	svc := NewIncidents(db, cache, &stubCacheRetryQueue{}, testLogger(cfg), cfg)
 
-	_, err := svc.Update(existing.ID.String(), "t2", "d2", 1, 1, 2, string(domain.SeverityHigh), "type2", context.Background())
+	_, err := svc.Update(context.Background(), existing.ID.String(), "t2", "d2", 1, 1, 2, string(domain.SeverityHigh), "type2")
 	if err == nil {
 		t.Fatal("expected db error")
 	}
@@ -223,7 +229,7 @@ func TestIncidents_Create_InvalidDescription(t *testing.T) {
 	cfg := testIncidentsConfig()
 	svc := NewIncidents(&stubIncidentsDB{}, &stubIncidentsCache{}, &stubCacheRetryQueue{}, testLogger(cfg), cfg)
 
-	_, err := svc.Create("tt", "d", 0, 0, 1, string(domain.SeverityLow), "type", context.Background())
+	_, err := svc.Create(context.Background(), "tt", "d", 0, 0, 1, string(domain.SeverityLow), "type")
 	if !errors.Is(err, domain.ErrInvalidDescription) {
 		t.Fatalf("expected ErrInvalidDescription, got %v", err)
 	}

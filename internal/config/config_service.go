@@ -2,12 +2,12 @@ package config
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/caarlos0/env/v6"
 	"github.com/joho/godotenv"
 )
 
+// NewAppConfig loads configuration from .env and environment variables.
 func NewAppConfig() (*App, error) {
 	if err := godotenv.Load(".env"); err != nil {
 		fmt.Println("warning: could not load .env:", err)
@@ -15,7 +15,7 @@ func NewAppConfig() (*App, error) {
 
 	var cfg App
 	if err := env.Parse(&cfg); err != nil {
-		log.Fatalf("failed to parse env: %v", err)
+		return nil, fmt.Errorf("parse env: %w", err)
 	}
 
 	return &cfg, nil

@@ -9,16 +9,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type Location struct {
-	service LocationService
-}
-
+// LocationService defines the interface consumed by the location handler.
 type LocationService interface {
-	Check(latitude, longitude float64, uid string, ctx context.Context) ([]*domain.Incident, error)
+	Check(ctx context.Context, lat, lon float64, uid string) ([]*domain.Incident, error)
 }
 
-func NewLocation(service LocationService) *Location {
-	return &Location{service: service}
+// Location is the HTTP handler for location endpoints.
+type Location struct {
+	svc LocationService
+}
+
+// NewLocation creates a Location handler.
+func NewLocation(svc LocationService) *Location {
+	return &Location{svc: svc}
 }
 
 // @Summary Проверить местоположение
@@ -31,16 +34,18 @@ func NewLocation(service LocationService) *Location {
 // @Failure 400 {object} dto.ErrorResponse
 // @Failure 500 {object} dto.ErrorResponse
 // @Router /api/v1/location/check [post]
-func (l *Location) Check(c *gin.Context) {
-	var locationReq dto.LocationRequest
-	if err := c.ShouldBindJSON(&locationReq); err != nil {
+func (h *Location) Check(c *gin.Context) {
+	var req dto.LocationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
-	incidents, err := l.service.Check(locationReq.Latitude, locationReq.Longitude, locationReq.UID, c.Request.Context())
+
+	incidents, err := h.svc.Check(c.Request.Context(), req.Latitude, req.Longitude, req.UID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
+
 	c.JSON(http.StatusOK, gin.H{"incidents": incidents})
 }

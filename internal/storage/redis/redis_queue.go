@@ -6,33 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"geoNotifications/internal/domain"
-	retry "geoNotifications/internal/rerty"
-	"geoNotifications/internal/webhookSender"
+	"geoNotifications/internal/retry"
+	"geoNotifications/internal/webhook"
+	"time"
 
 	"go.uber.org/zap/zapcore"
-
-	"time"
 )
 
-func (r *Redis) EnqueueLocationCheck(taskData domain.LocationCheckTask, ctx context.Context, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+// EnqueueLocationCheck pushes a location check task to the Redis queue.
+func (r *Redis) EnqueueLocationCheck(ctx context.Context, task domain.LocationCheckTask, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	data, err := json.Marshal(taskData)
+
+	data, err := json.Marshal(task)
 	if err != nil {
 		return fmt.Errorf("marshal location task: %w", err)
 	}
-	err = r.client.RPush(ctxWithTimeout, "location_check_queue", data).Err()
-	if err != nil {
-		return err
+
+	if err := r.client.RPush(ctx, "location_check_queue", data).Err(); err != nil {
+		return fmt.Errorf("enqueue location check: %w", err)
 	}
 	return nil
 }
 
-func (r *Redis) Run(ctx context.Context, webhookSender *webhookSender.WebhookSender) {
+// Run processes the location check queue until ctx is cancelled.
+func (r *Redis) Run(ctx context.Context, sender *webhook.Sender) {
 	for {
 		select {
 		case <-ctx.Done():
-			r.logger.Log(zapcore.InfoLevel, "queue worker stopped")
+			r.log.Log(zapcore.InfoLevel, "queue worker stopped")
 			return
 		default:
 		}
@@ -42,41 +44,42 @@ func (r *Redis) Run(ctx context.Context, webhookSender *webhookSender.WebhookSen
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			r.logger.Log(zapcore.ErrorLevel, "queue read error: "+err.Error())
+			r.log.Log(zapcore.ErrorLevel, "queue read error: "+err.Error())
 			continue
 		}
 
-		var locationTask domain.LocationCheckTask
-		if err := json.Unmarshal([]byte(data[1]), &locationTask); err != nil {
-			r.logger.Log(zapcore.ErrorLevel, "unmarshal task: "+err.Error())
+		var task domain.LocationCheckTask
+		if err := json.Unmarshal([]byte(data[1]), &task); err != nil {
+			r.log.Log(zapcore.ErrorLevel, "unmarshal task: "+err.Error())
 			continue
 		}
 
-		err = retry.DoContext(ctx, retry.Strategy{
+		err = retry.Do(ctx, retry.Strategy{
 			Attempts: r.cfg.Retry.MaxAttempts,
 			Delay:    r.cfg.Retry.Delay,
 			Backoff:  r.cfg.Retry.Backoff,
 		}, func() error {
-			return webhookSender.SendWebhook(locationTask)
+			return sender.Send(task)
 		})
-
 		if err != nil {
-			r.logger.Log(zapcore.ErrorLevel, "send webhook failed: "+err.Error())
+			r.log.Log(zapcore.ErrorLevel, "send webhook failed: "+err.Error())
 		}
 	}
 }
 
-func (r *Redis) StartQueue(ctx context.Context, webhookSender *webhookSender.WebhookSender) {
+// StartQueue launches the queue worker in a goroutine.
+func (r *Redis) StartQueue(ctx context.Context, sender *webhook.Sender) {
 	ctx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.Run(ctx, webhookSender)
+		r.Run(ctx, sender)
 	}()
 }
 
+// StopQueue signals the queue worker to stop and waits for completion.
 func (r *Redis) StopQueue(ctx context.Context) error {
 	if r.cancel != nil {
 		r.cancel()

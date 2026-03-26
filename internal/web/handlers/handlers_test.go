@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// --- stubs ---
+
 type incidentsServiceStub struct {
 	createResp *domain.Incident
 	createErr  error
@@ -29,27 +31,31 @@ type incidentsServiceStub struct {
 	deleteErr  error
 }
 
-func (s *incidentsServiceStub) Create(title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error) {
+func (s *incidentsServiceStub) Create(ctx context.Context, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
 	return s.createResp, s.createErr
 }
-func (s *incidentsServiceStub) GetStats(ctx context.Context) (int, error) { return s.stats, s.statsErr }
+func (s *incidentsServiceStub) GetStats(ctx context.Context) (int, error) {
+	return s.stats, s.statsErr
+}
 func (s *incidentsServiceStub) GetAllIncidents(ctx context.Context, page, limit int) ([]domain.Incident, int, error) {
 	return s.list, s.total, s.listErr
 }
 func (s *incidentsServiceStub) GetByID(ctx context.Context, id string) (*domain.Incident, error) {
 	return s.getResp, s.getErr
 }
-func (s *incidentsServiceStub) Update(id, title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error) {
+func (s *incidentsServiceStub) Update(ctx context.Context, id, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
 	return s.updateResp, s.updateErr
 }
-func (s *incidentsServiceStub) Delete(ctx context.Context, id string) error { return s.deleteErr }
+func (s *incidentsServiceStub) Delete(ctx context.Context, id string) error {
+	return s.deleteErr
+}
 
 type locationServiceStub struct {
 	resp []*domain.Incident
 	err  error
 }
 
-func (s *locationServiceStub) Check(latitude, longitude float64, uid string, ctx context.Context) ([]*domain.Incident, error) {
+func (s *locationServiceStub) Check(ctx context.Context, lat, lon float64, uid string) ([]*domain.Incident, error) {
 	return s.resp, s.err
 }
 
@@ -71,13 +77,15 @@ func performRequest(r http.Handler, method, path string, body []byte, headers ma
 	return w
 }
 
+// --- incidents tests ---
+
 func TestIncidents_Create_ValidationError(t *testing.T) {
 	svc := &incidentsServiceStub{createErr: domain.ErrInvalidTitle}
 	h := NewIncidents(svc)
 	r := gin.New()
 	r.POST("/incidents", h.Create)
 
-	body := []byte(`{"description":"d","latitude":0,"longitude":0,"radius":1,"severity":"low","incident_type":"type"}`)
+	body := []byte(`{"title":"t","description":"d","latitude":0,"longitude":0,"radius":1,"severity":"low","incident_type":"type"}`)
 	w := performRequest(r, http.MethodPost, "/incidents", body, map[string]string{"Content-Type": "application/json"})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
@@ -92,7 +100,8 @@ func TestIncidents_Create_Success(t *testing.T) {
 	r.POST("/incidents", h.Create)
 
 	payload := map[string]any{
-		"title": "t", "description": "d", "latitude": 10, "longitude": 20, "radius": 1, "severity": "low", "incident_type": "type",
+		"title": "t", "description": "d", "latitude": 10, "longitude": 20,
+		"radius": 1, "severity": "low", "incident_type": "type",
 	}
 	buf, _ := json.Marshal(payload)
 	w := performRequest(r, http.MethodPost, "/incidents", buf, map[string]string{"Content-Type": "application/json"})
@@ -149,6 +158,8 @@ func TestIncidents_GetStats(t *testing.T) {
 	}
 }
 
+// --- location tests ---
+
 func TestLocation_Check_Success(t *testing.T) {
 	svc := &locationServiceStub{resp: []*domain.Incident{}}
 	h := NewLocation(svc)
@@ -174,6 +185,8 @@ func TestLocation_Check_BadRequest(t *testing.T) {
 	}
 }
 
+// --- system tests ---
+
 func TestSystem_Health_Degraded(t *testing.T) {
 	svc := &systemServiceStub{status: domain.HealthStatus{Database: false, Redis: true}}
 	h := NewSystem(svc)
@@ -185,6 +198,8 @@ func TestSystem_Health_Degraded(t *testing.T) {
 		t.Fatalf("expected 503, got %d", w.Code)
 	}
 }
+
+// --- middleware tests ---
 
 func TestAuthMiddleware(t *testing.T) {
 	r := gin.New()

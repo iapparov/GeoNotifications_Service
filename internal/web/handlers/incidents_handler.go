@@ -12,21 +12,24 @@ import (
 	"github.com/google/uuid"
 )
 
-type Incidents struct {
-	service IncidentsService
-}
-
+// IncidentsService defines the interface consumed by the incidents handler.
 type IncidentsService interface {
-	Create(title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error)
+	Create(ctx context.Context, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error)
 	GetStats(ctx context.Context) (int, error)
 	GetAllIncidents(ctx context.Context, page, limit int) ([]domain.Incident, int, error)
 	GetByID(ctx context.Context, id string) (*domain.Incident, error)
-	Update(id, title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error)
+	Update(ctx context.Context, id, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error)
 	Delete(ctx context.Context, id string) error
 }
 
-func NewIncidents(service IncidentsService) *Incidents {
-	return &Incidents{service: service}
+// Incidents is the HTTP handler for incident endpoints.
+type Incidents struct {
+	svc IncidentsService
+}
+
+// NewIncidents creates an Incidents handler.
+func NewIncidents(svc IncidentsService) *Incidents {
+	return &Incidents{svc: svc}
 }
 
 // @Summary Создать инцидент
@@ -40,23 +43,28 @@ func NewIncidents(service IncidentsService) *Incidents {
 // @Failure 500 {object} dto.ErrorResponse
 // @Security ApiKeyAuth
 // @Router /api/v1/incidents [post]
-func (i *Incidents) Create(c *gin.Context) {
-	var inc dto.IncidentRequestCreate
-	if err := c.ShouldBindJSON(&inc); err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
-		return
-	}
-	incident, err := i.service.Create(inc.Title, inc.Description, inc.Latitude, inc.Longitude, inc.Radius, inc.Severity, inc.IncidentType, c.Request.Context())
-	if i.incidentsValidation(err) {
+func (h *Incidents) Create(c *gin.Context) {
+	var req dto.IncidentRequestCreate
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
 
+	inc, err := h.svc.Create(c.Request.Context(),
+		req.Title, req.Description,
+		req.Latitude, req.Longitude, req.Radius,
+		req.Severity, req.IncidentType,
+	)
+	if isValidationErr(err) {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, incident)
+
+	c.JSON(http.StatusCreated, inc)
 }
 
 // @Summary Статистика инцидентов
@@ -66,8 +74,8 @@ func (i *Incidents) Create(c *gin.Context) {
 // @Success 200 {object} map[string]int "total_incidents"
 // @Failure 500 {object} dto.ErrorResponse
 // @Router /api/v1/incidents/stats [get]
-func (i *Incidents) GetStats(c *gin.Context) {
-	count, err := i.service.GetStats(c.Request.Context())
+func (h *Incidents) GetStats(c *gin.Context) {
+	count, err := h.svc.GetStats(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
@@ -85,29 +93,26 @@ func (i *Incidents) GetStats(c *gin.Context) {
 // @Failure 500 {object} dto.ErrorResponse
 // @Security ApiKeyAuth
 // @Router /api/v1/incidents [get]
-func (i *Incidents) GetAllIncidents(c *gin.Context) {
-	// Pagination parameters
-	page := c.Query("page")
-	pInt, err := strconv.Atoi(page)
-	if err != nil || pInt < 1 {
-		pInt = 1
+func (h *Incidents) GetAllIncidents(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
 	}
-	limit := c.Query("limit")
-	lInt, err := strconv.Atoi(limit)
-	if err != nil || lInt < 1 {
-		lInt = 10
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	if limit < 1 {
+		limit = 10
 	}
 
-	incidents, total, err := i.service.GetAllIncidents(c.Request.Context(), pInt, lInt)
+	incidents, total, err := h.svc.GetAllIncidents(c.Request.Context(), page, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"total":     total,
 		"incidents": incidents,
 	})
-
 }
 
 // @Summary Получить инцидент по ID
@@ -121,9 +126,8 @@ func (i *Incidents) GetAllIncidents(c *gin.Context) {
 // @Failure 500 {object} dto.ErrorResponse
 // @Security ApiKeyAuth
 // @Router /api/v1/incidents/{id} [get]
-func (i *Incidents) GetIncidentByID(c *gin.Context) {
-	id := c.Param("id")
-	incident, err := i.service.GetByID(c.Request.Context(), id)
+func (h *Incidents) GetIncidentByID(c *gin.Context) {
+	inc, err := h.svc.GetByID(c.Request.Context(), c.Param("id"))
 	if errors.Is(err, domain.ErrInvalidID) {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
 		return
@@ -136,7 +140,7 @@ func (i *Incidents) GetIncidentByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, incident)
+	c.JSON(http.StatusOK, inc)
 }
 
 // @Summary Обновить инцидент
@@ -152,29 +156,34 @@ func (i *Incidents) GetIncidentByID(c *gin.Context) {
 // @Failure 500 {object} dto.ErrorResponse
 // @Security ApiKeyAuth
 // @Router /api/v1/incidents/{id} [put]
-func (i *Incidents) PutIncident(c *gin.Context) {
+func (h *Incidents) PutIncident(c *gin.Context) {
 	id := c.Param("id")
-	_, err := uuid.Parse(id)
-	if err != nil {
+	if _, err := uuid.Parse(id); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: "invalid incident ID"})
 		return
 	}
-	var inc dto.IncidentRequestUpdate
-	if err := c.ShouldBindJSON(&inc); err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
-		return
-	}
-	incident, err := i.service.Update(id, inc.Title, inc.Description, inc.Latitude, inc.Longitude, inc.Radius, inc.Severity, inc.IncidentType, c.Request.Context())
-	if i.incidentsValidation(err) {
+
+	var req dto.IncidentRequestUpdate
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
 
+	inc, err := h.svc.Update(c.Request.Context(), id,
+		req.Title, req.Description,
+		req.Latitude, req.Longitude, req.Radius,
+		req.Severity, req.IncidentType,
+	)
+	if isValidationErr(err) {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Message: err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, incident)
+
+	c.JSON(http.StatusOK, inc)
 }
 
 // @Summary Удалить инцидент
@@ -187,11 +196,8 @@ func (i *Incidents) PutIncident(c *gin.Context) {
 // @Failure 500 {object} dto.ErrorResponse
 // @Security ApiKeyAuth
 // @Router /api/v1/incidents/{id} [delete]
-func (i *Incidents) DeleteIncident(c *gin.Context) {
-	id := c.Param("id")
-
-	err := i.service.Delete(c.Request.Context(), id)
-
+func (h *Incidents) DeleteIncident(c *gin.Context) {
+	err := h.svc.Delete(c.Request.Context(), c.Param("id"))
 	if errors.Is(err, domain.ErrInvalidID) {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Message: err.Error()})
 		return
@@ -203,7 +209,8 @@ func (i *Incidents) DeleteIncident(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
-func (i *Incidents) incidentsValidation(err error) bool {
+// isValidationErr returns true if err is a known domain validation error.
+func isValidationErr(err error) bool {
 	switch {
 	case errors.Is(err, domain.ErrInvalidTitle),
 		errors.Is(err, domain.ErrInvalidDescription),

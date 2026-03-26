@@ -12,86 +12,85 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-type Location struct {
-	locationDB    LocationDB
-	locationCache LocationCache
-	locationQueue LocationQueue
-	logger        *logger.Service
-	config        *config.App
-}
-
+// LocationDB defines database operations for location checks.
 type LocationDB interface {
-	SaveCheckHistory(location *domain.Location, ctx context.Context, timeOut time.Duration) error
+	SaveCheckHistory(ctx context.Context, loc *domain.Location, timeout time.Duration) error
+	FindNearby(ctx context.Context, lat, lon float64, timeout time.Duration) ([]*domain.Incident, error)
 }
 
-type LocationCache interface {
-	Check(location *domain.Location, ctx context.Context, timeOut time.Duration) ([]*domain.Incident, error)
-}
-
+// LocationQueue defines the interface for enqueuing location check tasks.
 type LocationQueue interface {
-	EnqueueLocationCheck(taskData domain.LocationCheckTask, ctx context.Context, timeOut time.Duration) error
+	EnqueueLocationCheck(ctx context.Context, task domain.LocationCheckTask, timeout time.Duration) error
 }
 
-func NewLocation(db LocationDB, cache LocationCache, locationQueue LocationQueue, logger *logger.Service, config *config.App) *Location {
+// Location handles location check business logic.
+type Location struct {
+	db    LocationDB
+	queue LocationQueue
+	log   *logger.Service
+	cfg   *config.App
+}
+
+// NewLocation creates a Location service.
+func NewLocation(db LocationDB, queue LocationQueue, log *logger.Service, cfg *config.App) *Location {
 	return &Location{
-		locationDB:    db,
-		locationCache: cache,
-		logger:        logger,
-		locationQueue: locationQueue,
-		config:        config,
+		db:    db,
+		queue: queue,
+		log:   log,
+		cfg:   cfg,
 	}
 }
 
-func (l *Location) Check(latitude, longitude float64, uid string, ctx context.Context) ([]*domain.Incident, error) {
-
-	err := l.isLocationValid(latitude, longitude, uid)
-	if err != nil {
-		l.logger.Log(zapcore.DebugLevel, "invalid location data: "+err.Error())
+// Check verifies whether the user is within any active incident geofence.
+// If the user is in danger, the check is enqueued for webhook notification.
+func (s *Location) Check(ctx context.Context, lat, lon float64, uid string) ([]*domain.Incident, error) {
+	if err := s.validateInput(lat, lon, uid); err != nil {
+		s.log.Log(zapcore.DebugLevel, "invalid location data: "+err.Error())
 		return nil, err
 	}
-	loc := domain.NewLocation(uuid.MustParse(uid), latitude, longitude)
 
-	incidents, err := l.locationCache.Check(loc, ctx, l.config.DB.TimeOuts.Read)
+	loc := domain.NewLocation(uuid.MustParse(uid), lat, lon)
+
+	incidents, err := s.db.FindNearby(ctx, lat, lon, s.cfg.DB.TimeOuts.Read)
 	if err != nil {
-		l.logger.Log(zapcore.WarnLevel, "failed to check location in cache: "+err.Error())
+		s.log.Log(zapcore.WarnLevel, "find nearby incidents: "+err.Error())
 		return nil, err
 	}
+
 	if len(incidents) > 0 {
 		loc.InDanger = true
 	}
 
-	err = l.locationDB.SaveCheckHistory(loc, ctx, l.config.DB.TimeOuts.Write)
-	if err != nil {
-		l.logger.Log(zapcore.ErrorLevel, "failed to save check history in db: "+err.Error())
+	if err := s.db.SaveCheckHistory(ctx, loc, s.cfg.DB.TimeOuts.Write); err != nil {
+		s.log.Log(zapcore.ErrorLevel, "save check history: "+err.Error())
 	}
 
 	if len(incidents) > 0 {
-		if l.locationQueue == nil {
-			l.logger.Log(zapcore.ErrorLevel, "location queue is not configured")
+		if s.queue == nil {
+			s.log.Log(zapcore.ErrorLevel, "location queue is not configured")
 			return incidents, errors.New("location queue is not configured")
 		}
-		var taskData = domain.LocationCheckTask{
+
+		task := domain.LocationCheckTask{
 			Location:  loc,
 			Incidents: incidents,
 		}
-
-		err = l.locationQueue.EnqueueLocationCheck(taskData, ctx, l.config.DB.TimeOuts.Write)
-		if err != nil {
-			l.logger.Log(zapcore.WarnLevel, "failed to enqueue location check: "+err.Error())
+		if err := s.queue.EnqueueLocationCheck(ctx, task, s.cfg.DB.TimeOuts.Write); err != nil {
+			s.log.Log(zapcore.WarnLevel, "enqueue location check: "+err.Error())
 		}
 	}
+
 	return incidents, nil
 }
 
-func (l *Location) isLocationValid(latitude, longitude float64, uid string) error {
-	_, err := uuid.Parse(uid)
-	if err != nil {
-		return err
+func (s *Location) validateInput(lat, lon float64, uid string) error {
+	if _, err := uuid.Parse(uid); err != nil {
+		return domain.ErrInvalidID
 	}
-	if latitude < -90 || latitude > 90 {
+	if lat < -90 || lat > 90 {
 		return domain.ErrInvalidLatitude
 	}
-	if longitude < -180 || longitude > 180 {
+	if lon < -180 || lon > 180 {
 		return domain.ErrInvalidLongitude
 	}
 	return nil

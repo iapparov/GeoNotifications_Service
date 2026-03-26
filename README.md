@@ -1,82 +1,133 @@
 # GeoNotifications Core (Go)
 
-Ядро системы геооповещений: принимает координаты мобильного приложения, возвращает активные инциденты и при опасности асинхронно шлет вебхук на портал новостей.
+GeoNotifications - бэкенд-сервис системы геооповещений. Он решает одну конкретную задачу: в реальном времени определять, находится ли пользователь 
+мобильного приложения в зоне опасного инцидента (пожар, авария, стихийное бедствие), и если да - немедленно уведомлять об этом портал новостей через webhook.
 
-## Архитектура
-- Clean Architecture: Handlers (Gin) → Services → Storage (Postgres/Redis) → внешние очереди/вебхуки.
-- Асинхронный логгер (zap) и очередь повторов для кэша/вебхуков.
-- Swagger доступен по `/api/v1/swagger/index.html`.
+### Архитектура
 
+- Clean Architecture: HTTP-хендлеры (Gin) -> сервисы (бизнес-логика) -> хранилища (Postgres, Redis) -> внешние системы (webhook).
+- Ручная сборка зависимостей в `internal/di/di.go` -- без DI-контейнеров и магии. Все ошибки конфигурации отлавливаются при старте, а не в рантайме.
+- Graceful shutdown: при получении SIGINT/SIGTERM сервис последовательно останавливает HTTP-сервер, воркеры очередей, закрывает соединения с Redis и Postgres, завершает логгер.
+- Асинхронный логгер на основе zap с буферизацией.
+- PostgreSQL с расширением PostGIS. Используется функция `ST_DWithin`
+- Инциденты кэшируются в Redis. При чтении сервис сначала ищет данные в кэше, при промахе -- идет в PostgreSQL и прогревает кэш.
+- Retry стратегия
+- Webhook-очередь
 
 ## Состав репозитория
 
-- `cmd/geoNotifications/main.go` — точка входа сервиса (Fx DI).
-- `cmd/webhook-stub/` — заглушка вебхука (порт 9090, Dockerfile + entrypoint).
-- `internal/`
-  - `app/` — запуск приложения и DI провайдеры.
-  - `config/` — модели конфигурации и загрузка из env.
-  - `domain/` — сущности и доменные ошибки.
-  - `logger/` — zap-логгер и асинхронная обертка.
-  - `rerty/` — стратегия retry.
-  - `service/` — бизнес-логика (incidents, location, system).
-  - `storage/postgres/` — Postgres-репозитории.
-  - `storage/redis/` — кэш и очередь для ретраев.
-  - `web/` — dto, хендлеры Gin, middleware, роутеры.
-  - `webhookSender/` — отправка вебхуков.
-- `docs/` — Swagger-описание.
-- `migrations/` — SQL-миграции.
-- `docker-compose.yaml` — Postgres, Redis, webhook stub.
-- `go.mod`, `go.sum` — зависимости.
+```
+cmd/
+  geoNotifications/main.go   - точка входа в сервис
+  webhook-stub/               - webhook-приемник (Dockerfile + entrypoint)
 
+internal/
+  app/                        - запуск приложения, обработка сигналов, graceful shutdown
+  config/                     - конфиг, переменные окружения, валидация
+  di/                         -- явная сборка (Container)
+  domain/                     - доменные сущности (Incident, Location, LocationCheckTask) и ошибки
+  logger/                     - zap-логгер с асинхронной оберткой
+  retry/                      - retry стратегия (attempts, delay, backoff)
+  service/                    - бизнес-логика: incidents, location, system
+  storage/postgres/           - репозитории PostgreSQL (PostGIS для пространственных запросов)
+  storage/redis/              - кэш инцидентов, очередь webhook-задач, очередь retry для кэша
+  web/dto/                    - структуры запросов/ответов
+  web/handlers/               - HTTP-хендлеры Gin
+  web/middlewares/            - middleware (логирование запросов, аутентификация по API-ключу)
+  web/routers/                - роутинг (публичные и приватные эндпоинты)
+  webhook/                    - отправка HTTP POST на внешний webhook
+
+docs/                         - Swagger
+migrations/                   - SQL-миграции (создание таблиц, PostGIS-расширение, GIST-индекс)
+docker-compose.yaml           - PostGIS, Redis, миграции, webhook-заглушка, ngrok
+```
 
 ## Требования
+
 - Go 1.24+
-- Postgres 15
-- Redis 6+
-- Docker / docker-compose (для локального поднятия стека)
+- PostgreSQL 16 с PostGIS
+- Redis 7+
+- Docker и docker compose (для локального поднятия инфраструктуры)
 
-## Быстрый старт (Docker)
+## Быстрый старт
 
-Для работы ngrok (если нужно пробросить вебхук-заглушку):
-В .env задайте `WEBHOOK_URL` вида `https://<your_subdomain>.ngrok.io/webhook`.
-Перед этим задайте `NGROK_AUTHTOKEN` (зарегистрируйтесь на ngrok.com).
 ```bash
-cp .env.example .env   # если есть, иначе задайте переменные вручную
-docker-compose up --build
+# 1. Скопировать и заполнить переменные окружения
+cp .env.example .env
+
+# 2. Поднять инфраструктуру (PostgreSQL + PostGIS, Redis, миграции, webhook-заглушка)
+docker compose up --build -d
+
+# 3. Запустить сервис
 go run ./cmd/geoNotifications
 ```
-По умолчанию сервис слушает `${SERVER_PORT}`. Вебхук-заглушка поднимется на :9090 (cmd/webhook-stub).
-Контейнеры: postgres → порт 5433, Redis → 6379
-Миграции применятся автоматически при старте сервиса.
-Ngrok + webhook сервис также запустся автоматически, если задан `NGROK_AUTHTOKEN`.
+
+Сервис запустится на `${SERVER_HOST}:${SERVER_PORT}` (по умолчанию `:8080`).
+
+Контейнеры:
+- PostgreSQL (PostGIS) -- порт 5433
+- Redis -- порт 6379
+- Webhook-заглушка -- порт 9090
+- Ngrok (опционально) -- веб-интерфейс на порту 4040
+
+Миграции применяются автоматически через контейнер `migrate`.
+
+Если нужен внешний доступ к webhook-заглушке, задайте `NGROK_AUTHTOKEN` в `.env` и укажите `WEBHOOK_URL` вида `https://<subdomain>.ngrok.io/webhook`.
 
 ## Миграции
-SQL-миграции лежат в `migrations/`. 
+
+SQL-миграции лежат в `migrations/`. Для ручного запуска:
+
 ```bash
-migrate -path ./migrations -database "postgres://user:password@localhost:5433/dbname?
+migrate -path ./migrations \
+  -database "postgres://user:password@localhost:5433/dbname?sslmode=disable" up
 ```
-## Тесты и покрытие
+
+## API
+
+### Публичные эндпоинты
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| POST | `/api/v1/location/check` | Проверка координат пользователя. Возвращает список инцидентов, в зоне которых он находится. Сохраняет запись в историю и при опасности ставит задачу на webhook. |
+| GET | `/api/v1/incidents/stats` | Статистика: количество уникальных пользователей, проверивших координаты за настроенное временное окно. |
+| GET | `/api/v1/system/health` | Health-check (проверка доступности PostgreSQL и Redis). |
+| GET | `/api/v1/swagger/index.html` | Swagger UI. |
+
+### Приватные эндпоинты (требуется заголовок `X-API-Key`)
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| POST | `/api/v1/incidents` | Создать инцидент (координаты, радиус, severity, тип). |
+| GET | `/api/v1/incidents?page=1&limit=10` | Список инцидентов с пагинацией. |
+| GET | `/api/v1/incidents/{id}` | Получить инцидент по ID. |
+| PUT | `/api/v1/incidents/{id}` | Обновить инцидент. |
+| DELETE | `/api/v1/incidents/{id}` | Деактивировать инцидент (soft delete). |
+
+## Тесты
+
 ```bash
 go test ./... -cover
 ```
 
-## Основные эндпоинты
-Private (API-key в `X-API-Key`):
-- `POST /api/v1/incidents` — создать .
-- `GET /api/v1/incidents?page=1&limit=10` — список с пагинацией.
-- `GET /api/v1/incidents/{id}` — получить по ID.
-- `PUT /api/v1/incidents/{id}` — обновить.
-- `DELETE /api/v1/incidents/{id}` — деактивировать.
-Public:
-- `GET /api/v1/incidents/stats` — статистика (уникальные user_id за окно времени).
-- `POST /api/v1/location/check` — публичная проверка координат; сохраняет историю и ставит задачу на вебхук.
-- `GET /api/v1/system/health` — health-check.
-- Swagger UI: `GET /api/v1/swagger/index.html`.
+## Переменные окружения
 
-## Вебхуки
-- Асинхронная отправка через `internal/webhookSender`.
-- Тестовая заглушка: `cmd/webhook-stub` (порт 9090). Можно туннелировать через ngrok: `ngrok http 9090` и передать URL в `WEBHOOK_URL`.
+Основные переменные (полный список -- в `internal/config/config_model.go`):
 
-## Логирование и наблюдаемость
-- zap, асинхронный буфер `LOGGER_BUFFER_SIZE`.
-- Middleware логирует HTTP-запросы.
+| Переменная | Описание |
+|------------|----------|
+| `SERVER_HOST`, `SERVER_PORT` | Адрес и порт HTTP-сервера |
+| `DB_POSTGRES_HOST`, `DB_POSTGRES_PORT`, `DB_POSTGRES_USER`, `DB_POSTGRES_PASSWORD`, `DB_POSTGRES_DBNAME`, `DB_POSTGRES_SSLMODE` | Подключение к PostgreSQL |
+| `DB_REDIS_HOST`, `DB_REDIS_PORT`, `DB_REDIS_PASSWORD`, `DB_REDIS_DB` | Подключение к Redis |
+| `DB_REDIS_CACHESIZE` | Максимальный размер кэша инцидентов |
+| `DB_REDIS_CACHERETRYSIZE` | Размер буфера очереди повторных попыток записи в кэш |
+| `DB_TIMEOUTS_WRITE`, `DB_TIMEOUTS_READ`, `DB_TIMEOUTS_LONG` | Таймауты операций с БД |
+| `WEBHOOK_URL` | URL внешнего webhook-приемника |
+| `AUTH_APIKEY` | API-ключ для приватных эндпоинтов |
+| `RETRY_ATTEMPTS`, `RETRY_DELAY`, `RETRY_BACKOFF` | Параметры стратегии повторных попыток |
+| `STATS_TIME_WINDOW_MINUTES` | Временное окно для подсчета статистики (в минутах) |
+| `INCIDENT_TITLEMINLENGTH`, `INCIDENT_TITLEMAXLENGTH` | Ограничения длины заголовка инцидента |
+| `INCIDENT_DESCRMINLENGTH`, `INCIDENT_DESCRMAXLENGTH` | Ограничения длины описания инцидента |
+| `LOGGER_MODE`, `LOGGER_LEVEL`, `LOGGER_BUFFER_SIZE` | Настройки логгера |
+| `GIN_MODE` | Режим Gin (`debug`, `release`, `test`) |
+| `NGROK_AUTHTOKEN` | Токен ngrok для туннелирования webhook-заглушки (опционально) |

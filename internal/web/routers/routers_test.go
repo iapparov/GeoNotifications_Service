@@ -21,13 +21,9 @@ func TestRegisterRoutes_Basic(t *testing.T) {
 	cfg := &config.App{Logger: config.Logger{BuffSize: 10, Mode: "dev", Level: "debug"}}
 	logSvc := logger.NewService(cfg)
 
-	incSvc := incServiceStub{}
-	locSvc := locServiceStub{}
-	sysSvc := sysServiceStub{}
-
-	incHandler := handlers.NewIncidents(incSvc)
-	locHandler := handlers.NewLocation(locSvc)
-	sysHandler := handlers.NewSystem(sysSvc)
+	incHandler := handlers.NewIncidents(incServiceStub{})
+	locHandler := handlers.NewLocation(locServiceStub{})
+	sysHandler := handlers.NewSystem(sysServiceStub{})
 
 	RegisterRoutes(eng, locHandler, incHandler, sysHandler, logSvc, "key")
 
@@ -55,7 +51,7 @@ func TestRegisterRoutes_Basic(t *testing.T) {
 
 type incServiceStub struct{}
 
-func (s incServiceStub) Create(string, string, float64, float64, float64, string, string, context.Context) (*domain.Incident, error) {
+func (s incServiceStub) Create(ctx context.Context, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
 	return domain.NewIncident("t", "d", 0, 0, 1, domain.SeverityLow, "type"), nil
 }
 func (s incServiceStub) GetStats(ctx context.Context) (int, error) { return 1, nil }
@@ -65,14 +61,14 @@ func (s incServiceStub) GetAllIncidents(ctx context.Context, page, limit int) ([
 func (s incServiceStub) GetByID(ctx context.Context, id string) (*domain.Incident, error) {
 	return domain.NewIncident("t", "d", 0, 0, 1, domain.SeverityLow, "type"), nil
 }
-func (s incServiceStub) Update(id, title, description string, latitude, longitude, radius float64, severity, incidentType string, ctx context.Context) (*domain.Incident, error) {
+func (s incServiceStub) Update(ctx context.Context, id, title, description string, lat, lon, radius float64, severity, incidentType string) (*domain.Incident, error) {
 	return domain.NewIncident("t", "d", 0, 0, 1, domain.SeverityLow, "type"), nil
 }
 func (s incServiceStub) Delete(ctx context.Context, id string) error { return nil }
 
 type locServiceStub struct{}
 
-func (l locServiceStub) Check(latitude, longitude float64, uid string, ctx context.Context) ([]*domain.Incident, error) {
+func (s locServiceStub) Check(ctx context.Context, lat, lon float64, uid string) ([]*domain.Incident, error) {
 	return []*domain.Incident{}, nil
 }
 

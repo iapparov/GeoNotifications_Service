@@ -11,15 +11,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// Postgres wraps a pgx connection pool.
 type Postgres struct {
-	db     *pgxpool.Pool
-	logger *logger.Service
-	cfg    *config.App
+	pool *pgxpool.Pool
+	log  *logger.Service
+	cfg  *config.App
 }
 
-func NewPostgres(cfg *config.App, logger *logger.Service) (*Postgres, error) {
+// NewPostgres opens a connection pool and verifies connectivity.
+func NewPostgres(cfg *config.App, log *logger.Service) (*Postgres, error) {
 	connStr := fmt.Sprintf(
-		"postgres://%s:%d/%s?sslmode=%s",
+		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		cfg.DB.Postgres.User,
+		cfg.DB.Postgres.Password,
 		cfg.DB.Postgres.Host,
 		cfg.DB.Postgres.Port,
 		cfg.DB.Postgres.DBName,
@@ -31,43 +35,42 @@ func NewPostgres(cfg *config.App, logger *logger.Service) (*Postgres, error) {
 		return nil, fmt.Errorf("parse pg config: %w", err)
 	}
 
-	poolCfg.ConnConfig.Password = cfg.DB.Postgres.Password
-	poolCfg.ConnConfig.User = cfg.DB.Postgres.User
-
 	poolCfg.MaxConns = int32(cfg.DB.Postgres.MaxOpenConns)
 	poolCfg.MaxConnLifetime = cfg.DB.Postgres.ConnMaxLifetime
 
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pg pool: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	logger.Log(zap.InfoLevel, "connected to postgres")
+	log.Log(zap.InfoLevel, "connected to postgres")
 
 	return &Postgres{
-		db:     pool,
-		logger: logger,
-		cfg:    cfg,
+		pool: pool,
+		log:  log,
+		cfg:  cfg,
 	}, nil
 }
 
+// Close releases all pool resources.
 func (p *Postgres) Close() {
-	p.db.Close()
+	p.pool.Close()
 }
 
-func (p *Postgres) Ping(ctx context.Context, timeOut time.Duration) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeOut)
+// Ping checks database connectivity within the given timeout.
+func (p *Postgres) Ping(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := p.db.Ping(ctxWithTimeout)
-	if err != nil {
+
+	if err := p.pool.Ping(ctx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
 	}
 	return nil
